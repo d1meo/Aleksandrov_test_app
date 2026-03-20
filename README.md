@@ -21,8 +21,8 @@ REST API на **FastAPI** для загрузки и анализа успева
 
 ```bash
 # 1. Клонировать репозиторий
-git clone <repo-url>
-cd ecom_test_app
+git clone https://github.com/d1meo/Aleksandrov_test_app
+cd Aleksandrov_test_app
 
 # 2. Создать .env из шаблона
 cp .env.example .env
