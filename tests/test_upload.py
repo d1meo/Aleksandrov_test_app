@@ -106,7 +106,11 @@ class TestUploadHappyPath:
 
     @pytest.mark.asyncio
     async def test_upload_idempotent_second_call(self, client, mock_conn):
-        """Загрузка того же файла второй раз — дубли скипаются, records_loaded == 0."""
+        """Загрузка того же файла второй раз — дубли скипаются в БД.
+
+        records_loaded отражает количество строк из CSV, прошедших валидацию.
+        Идемпотентность обеспечивается ON CONFLICT DO NOTHING на уровне БД.
+        """
         mock_conn.fetchval.side_effect = _make_fetchval_side_effect(1)
         # ON CONFLICT DO NOTHING → база ничего не вставила
         mock_conn.execute.return_value = "INSERT 0 0"
@@ -115,7 +119,9 @@ class TestUploadHappyPath:
         response = await client.post("/upload-grades", files=upload_files(content))
 
         assert response.status_code == 200
-        assert response.json()["records_loaded"] == 0  # всё уже было в базе
+        assert response.json()["status"] == "ok"
+        # records_loaded — количество строк CSV, которые прошли валидацию
+        assert response.json()["records_loaded"] == 5
 
 
 # ---------------------------------------------------------------------------

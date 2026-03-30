@@ -1,30 +1,26 @@
 """
-Аналитические ручки — смотрим кто конкретно не вывозит учёбу.
+Аналитические ручки:
 
-  GET /students/more-than-3-twos   — двоечники хардкорные (двоек > 3)
-  GET /students/less-than-5-twos   — двоечники лайтовые (двоек < 5, но хотя бы одна)
+  GET /students/more-than-3-twos   — студенты с количеством двоек > 3
+  GET /students/less-than-5-twos   — студенты с количеством двоек < 5
 """
 
-from fastapi import APIRouter
+import logging
+
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.database import get_connection
+from app.exceptions import DatabaseError
+from app.services import grades as grades_service
 
 router = APIRouter(prefix="/students", tags=["students"])
+logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Схема ответа
-# ---------------------------------------------------------------------------
 
 class StudentTwosResponse(BaseModel):
     full_name: str
     count_twos: int
 
-
-# ---------------------------------------------------------------------------
-# Эндпоинты
-# ---------------------------------------------------------------------------
 
 @router.get(
     "/more-than-3-twos",
@@ -32,22 +28,24 @@ class StudentTwosResponse(BaseModel):
     summary="Студенты с оценкой 2 больше 3 раз",
 )
 async def students_more_than_3_twos() -> list[StudentTwosResponse]:
-    """Возвращаем тех, у кого двойка встречается строго больше 3 раз."""
-    async with get_connection() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                s.full_name,
-                COUNT(g.id) AS count_twos
-            FROM grades  g
-            JOIN students s ON s.id = g.student_id
-            WHERE g.grade = 2
-            GROUP BY s.id, s.full_name
-            HAVING COUNT(g.id) > 3
-            ORDER BY count_twos DESC, s.full_name
-            """
-        )
-    return [StudentTwosResponse(full_name=r["full_name"], count_twos=r["count_twos"]) for r in rows]
+    """Возвращает студентов, у которых двойка встречается строго больше 3 раз."""
+    try:
+        logger.info("Fetching students with more than 3 twos")
+        rows = await grades_service.get_students_more_than_3_twos()
+        logger.info(f"Found {len(rows)} students with more than 3 twos")
+        return [StudentTwosResponse(**row) for row in rows]
+    except DatabaseError as exc:
+        logger.error(f"Database error fetching students with more than 3 twos: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Сервис временно недоступен. Попробуйте позже."
+        ) from exc
+    except Exception as exc:
+        logger.error(f"Unexpected error fetching students with more than 3 twos: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Внутренняя ошибка сервера."
+        ) from exc
 
 
 @router.get(
@@ -56,21 +54,24 @@ async def students_more_than_3_twos() -> list[StudentTwosResponse]:
     summary="Студенты с оценкой 2 меньше 5 раз",
 )
 async def students_less_than_5_twos() -> list[StudentTwosResponse]:
-    """Возвращаем тех, у кого двойка встречается строго меньше 5 раз.
-    Студенты без единой двойки в выборку не попадают — они тут ни при чём.
+    """Возвращает студентов, у которых двойка встречается строго меньше 5 раз.
+
+    Студенты без единой двойки в выборку не попадают.
     """
-    async with get_connection() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                s.full_name,
-                COUNT(g.id) AS count_twos
-            FROM grades  g
-            JOIN students s ON s.id = g.student_id
-            WHERE g.grade = 2
-            GROUP BY s.id, s.full_name
-            HAVING COUNT(g.id) < 5
-            ORDER BY count_twos DESC, s.full_name
-            """
-        )
-    return [StudentTwosResponse(full_name=r["full_name"], count_twos=r["count_twos"]) for r in rows]
+    try:
+        logger.info("Fetching students with less than 5 twos")
+        rows = await grades_service.get_students_less_than_5_twos()
+        logger.info(f"Found {len(rows)} students with less than 5 twos")
+        return [StudentTwosResponse(**row) for row in rows]
+    except DatabaseError as exc:
+        logger.error(f"Database error fetching students with less than 5 twos: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Сервис временно недоступен. Попробуйте позже."
+        ) from exc
+    except Exception as exc:
+        logger.error(f"Unexpected error fetching students with less than 5 twos: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Внутренняя ошибка сервера."
+        ) from exc

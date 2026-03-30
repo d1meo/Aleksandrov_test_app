@@ -1,29 +1,24 @@
 """
-POST /upload-grades — принимаем CSV, валидируем, льём в базу.
+POST /upload-grades — принимаем CSV, передаём в сервисный слой для валидации и обработки.
 """
 
+import logging
 from fastapi import APIRouter, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from app.database import get_connection
-from app.validators import CSVValidationError, GradeRecord, parse_and_validate_csv
+from app.config import settings
+from app.exceptions import DatabaseError, ValidationError
+from app.services import grades as grades_service
 
 router = APIRouter(tags=["upload"])
+logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Схема ответа
-# ---------------------------------------------------------------------------
 
 class UploadResponse(BaseModel):
     status: str
     records_loaded: int
     students: int
 
-
-# ---------------------------------------------------------------------------
-# Эндпоинт
-# ---------------------------------------------------------------------------
 
 @router.post(
     "/upload-grades",
@@ -35,10 +30,10 @@ async def upload_grades(file: UploadFile) -> UploadResponse:
     """Загружаем CSV и сохраняем данные в базу.
 
     - **file**: CSV-файл (разделитель «;», кодировка UTF-8 или UTF-8-BOM).
+    - **Ограничения**: Максимальный размер {settings.max_upload_size_mb}MB
 
     Ожидаемые колонки: `Дата`, `Номер группы`, `ФИО`, `Оценка`
     """
-    # ---- базовые проверки файла -------------------------------------------
     if not file.filename:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -50,82 +45,49 @@ async def upload_grades(file: UploadFile) -> UploadResponse:
             detail=f"Ожидался файл с расширением .csv, получен: '{file.filename}'.",
         )
 
+    # Проверяем размер файла
+    MAX_FILE_SIZE = settings.max_upload_size_mb * 1024 * 1024
+    
+    # Читаем файл
     content = await file.read()
+    
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Файл слишком большой. Максимальный размер: {settings.max_upload_size_mb}MB",
+        )
+    
     if not content:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Загруженный файл пустой.",
         )
 
-    # ---- парсим и валидируем CSV ------------------------------------------
     try:
-        records: list[GradeRecord] = parse_and_validate_csv(content)
-    except CSVValidationError as exc:
+        logger.info(f"Processing upload request for file: {file.filename} ({len(content)} bytes)")
+        result = await grades_service.validate_and_upload_csv(content)
+        logger.info(f"Upload successful: {result.records_loaded} records, {result.students} students")
+        
+    except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
+    except DatabaseError as exc:
+        logger.error(f"Database error during upload: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Сервис временно недоступен. Попробуйте позже.",
+        ) from exc
+    except Exception as exc:
+        logger.error(f"Unexpected error during upload: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Внутренняя ошибка сервера.",
+        ) from exc
 
-    # ---- пишем в базу ------------------------------------------------------
-    _, student_ids = await _upsert_records(records)
-
-    # records_loaded — сколько строк из CSV прошло валидацию и попало в обработку.
-    # Именно это число ожидается в ответе по условию задачи.
     return UploadResponse(
         status="ok",
-        records_loaded=len(records),
-        students=len(student_ids),
+        records_loaded=result.records_loaded,
+        students=result.students,
     )
-
-
-# ---------------------------------------------------------------------------
-# Работа с базой
-# ---------------------------------------------------------------------------
-
-async def _upsert_records(records: list[GradeRecord]) -> tuple[int, set[int]]:
-    """Апсёртим записи в одной транзакции.
-
-    Возвращаем (количество_вставленных_строк, множество_id_студентов).
-    Повторная загрузка того же файла безопасна — дубли тихо скипаем.
-    """
-    records_loaded = 0
-    student_ids: set[int] = set()
-
-    async with get_connection() as conn:
-        async with conn.transaction():
-            for rec in records:
-                # Апсёртим студента и получаем его id — если уже есть, просто берём существующий.
-                student_id: int = await conn.fetchval(
-                    """
-                    INSERT INTO students (full_name, group_number)
-                    VALUES ($1, $2)
-                    ON CONFLICT ON CONSTRAINT uq_students_name_group
-                        DO UPDATE SET full_name = EXCLUDED.full_name
-                    RETURNING id
-                    """,
-                    rec.full_name,
-                    rec.group_number,
-                )
-                student_ids.add(student_id)
-
-                # Вставляем оценку; если такая уже есть на эту дату — скипаем без ошибки.
-                result = await conn.execute(
-                    """
-                    INSERT INTO grades (student_id, grade, date)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT ON CONSTRAINT uq_grades_student_date
-                        DO NOTHING
-                    """,
-                    student_id,
-                    rec.grade,
-                    rec.date,
-                )
-                # asyncpg возвращает строку вида "INSERT 0 1" или "INSERT 0 0".
-                # Последний токен — количество реально вставленных строк.
-                try:
-                    inserted = int(str(result).split()[-1])
-                except (ValueError, IndexError):
-                    inserted = 0
-                records_loaded += inserted
-
-    return records_loaded, student_ids

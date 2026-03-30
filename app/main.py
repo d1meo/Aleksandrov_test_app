@@ -1,31 +1,27 @@
 """
-Точка входа — тут всё стартует и всё умирает.
+Точка входа FastAPI-приложения.
 """
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
-from app.database import close_pool, create_pool
+from app.database import close_pool, create_pool, get_connection
 from app.routers import students, upload
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Жизненный цикл приложения
-# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Поднимаем пул коннектов при старте, гасим при завершении."""
+    """Поднимаем пул соединений при старте, закрываем при завершении."""
     await create_pool()
     yield
     await close_pool()
 
-
-# ---------------------------------------------------------------------------
-# Само приложение
-# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="Student Grades Service",
@@ -41,10 +37,16 @@ app.include_router(upload.router)
 app.include_router(students.router)
 
 
-# ---------------------------------------------------------------------------
-# Хелсчек — чтобы деплой не гадал, живы ли мы
-# ---------------------------------------------------------------------------
-
 @app.get("/health", tags=["system"], summary="Проверка работоспособности сервиса")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    """Проверяет доступность сервиса и подключение к БД."""
+    try:
+        async with get_connection() as conn:
+            await conn.fetch("SELECT 1")
+        return {"status": "ok", "database": "connected"}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service unavailable. Database connection failed: {str(e)}"
+        )

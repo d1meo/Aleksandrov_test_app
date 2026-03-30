@@ -1,0 +1,402 @@
+ДЕТАЛЬНЫЙ ПЛАН ИСПРАВЛЕНИЙ ПО ФИДБЕКУ
+
+=== 1. НАЗВАНИЕ ПРОЕКТА ПО PEP-8 ===
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+- Имя корневой папки: 'ecom_test_app' (соответствует PEP-8: lowercase с подчеркиваниями)
+- В README упоминается 'Aleksandrov_test_app'
+- Имя репозитория на GitHub неизвестно, но если оно содержит заглавные буквы или пробелы, нужно исправить
+
+КОНКРЕТНЫЕ ДЕЙСТВИЯ:
+1. Проверить имя репозитория на GitHub:
+   - Если репозиторий называется 'Aleksandrov_test_app' → переименовать в 'aleksandrov_test_app'
+   - Если содержит пробелы → заменить на подчеркивания
+   - Если содержит заглавные буквы → перевести в lowercase
+
+2. Обновить все ссылки в документации:
+   - В README.md заменить 'Aleksandrov_test_app' на новое имя
+   - В инструкциях клонирования обновить URL
+
+3. Проверить имя корневой директории локально:
+   - Если папка имеет неправильное имя, переименовать её
+   - Убедиться, что внутренние импорты не сломались (они используют 'app', поэтому не сломаются)
+
+=== 2. DOCKER COMPOSE НЕ ЗАПУСКАЕТСЯ ===
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+- Dockerfile использует 'uv sync --frozen --no-dev'
+- Файл uv.lock отсутствует в репозитории
+- Без uv.lock команда 'uv sync --frozen' падает с ошибкой
+
+КОНКРЕТНЫЕ ДЕЙСТВИЯ:
+
+ШАГ 1: Создать uv.lock файл
+```bash
+# Убедиться, что uv установлен глобально
+curl -Ls https://astral.sh/uv/install.sh | sh
+
+# В корне проекта создать lock файл
+uv lock
+```
+
+ШАГ 2: Добавить uv.lock в репозиторий
+```bash
+git add uv.lock
+git commit -m "Add uv.lock for reproducible builds"
+```
+
+АЛЬТЕРНАТИВНОЕ РЕШЕНИЕ (если не хотим добавлять uv.lock):
+Изменить Dockerfile, строка 12:
+Было: RUN uv sync --frozen --no-dev
+Стало: RUN uv sync --no-dev
+
+ШАГ 3: Проверить монтирование init.sql
+Убедиться, что в docker-compose.yml правильно указан путь:
+```yaml
+volumes:
+  - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+```
+
+ШАГ 4: Тестирование запуска
+```bash
+# Очистить предыдущие контейнеры и volumes
+docker compose down -v
+
+# Собрать и запустить
+docker compose up --build
+```
+
+=== 3. ПАКЕТНЫЙ МЕНЕДЖЕР ЛУЧШЕ ЗАМЕНИТЬ НА БОЛЕЕ АКТУАЛЬНЫЙ ===
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+- Используется uv (современный и актуальный)
+- Есть дублирование: pyproject.toml И requirements.txt
+- В Dockerfile используется uv, но в README есть инструкции с pip
+
+КОНКРЕТНЫЕ ДЕЙСТВИЯ:
+
+ШАГ 1: Удалить requirements.txt
+```bash
+rm requirements.txt
+```
+
+ШАГ 2: Обновить README.md
+- Убрать все упоминания requirements.txt
+- Заменить 'pip install -r requirements.txt' на 'uv sync'
+- Обновить секцию 'Локальный запуск (без Docker)'
+
+Пример изменений в README:
+```markdown
+## Локальный запуск (без Docker)
+
+### Требования
+- Python 3.12+
+- PostgreSQL 14+
+- uv (установить: curl -Ls https://astral.sh/uv/install.sh | sh)
+
+```bash
+# 1. Установить зависимости
+uv sync
+
+# 2. Создать базу данных и таблицы
+psql -U postgres -c "CREATE DATABASE grades_db;"
+psql -U postgres -d grades_db -f migrations/init.sql
+
+# 3. Настроить переменные окружения
+cp .env.example .env
+
+# 4. Запустить сервис
+uv run uvicorn app.main:app --reload
+```
+```
+
+ШАГ 3: Убедиться, что pyproject.toml содержит все зависимости
+Проверить, что в [project.dependencies] есть:
+- fastapi==0.111.1
+- uvicorn[standard]==0.30.1
+- asyncpg==0.29.0
+- pydantic-settings==2.3.4
+- python-multipart==0.0.9
+
+=== 4. МИГРАЦИИ ЛУЧШЕ ДЕЛАТЬ СТАНДАРТНЫМИ ИНСТРУМЕНТАМИ ===
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+- Используется простой SQL-скрипт migrations/init.sql
+- Нет версионирования, истории, возможности отката
+
+КОНКРЕТНЫЕ ДЕЙСТВИЯ:
+
+ШАГ 1: Установить Alembic
+```bash
+uv add alembic
+```
+
+ШАГ 2: Инициализировать Alembic
+```bash
+uv run alembic init migrations_alembic
+```
+
+ШАГ 3: Настроить alembic.ini
+- Указать правильный URL базы данных:
+```ini
+sqlalchemy.url = postgresql://user:pass@localhost/grades_db
+```
+- Или оставить динамическое чтение из переменных окружения (рекомендуется)
+
+ШАГ 4: Настроить env.py для использования asyncpg и pydantic-settings
+Нужно модифицировать migrations_alembic/env.py:
+```python
+import os
+from logging.config import fileConfig
+from app.config import settings
+from sqlalchemy import engine_from_config, pool
+from alembic import context
+
+# this is the Alembic Config object
+config = context.config
+
+# Interpret the config file for Python logging
+fileConfig(config.config_file_name)
+
+# Переопределяем sqlalchemy.url из настроек приложения
+config.set_main_option("sqlalchemy.url", settings.database_url)
+
+# ... остальной код ...
+```
+
+ШАГ 5: Создать начальную миграцию
+```bash
+uv run alembic revision -m "initial" --autogenerate
+```
+
+ШАГ 6: Создать скрипт для автоматического применения миграций при запуске
+Например, добавить в app/database.py:
+```python
+from alembic import command
+from alembic.config import Config
+
+async def run_migrations():
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    command.upgrade(alembic_cfg, "head")
+```
+
+И вызвать в lifespan перед созданием пула соединений.
+
+ШАГ 7: Обновить docker-compose.yml
+Добавить выполнение миграций при запуске приложения:
+```yaml
+app:
+  build: .
+  command: >
+    sh -c "uv run alembic upgrade head &&
+           uvicorn app.main:app --host 0.0.0.0 --port 8000"
+```
+
+ШАГ 8: Удалить старый init.sql или оставить как backup
+
+=== 5. КОММЕНТАРИИ-РАЗДЕЛИТЕЛИ ===
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+- В текущем коде разделители не обнаружены
+- Возможно, были в предыдущей версии и уже исправлены
+
+КОНКРЕТНЫЕ ДЕЙСТВИЯ:
+
+ШАГ 1: Проверить весь код на наличие разделителей
+```bash
+grep -r "^# ----" app/
+grep -r "^# =====" app/
+grep -r "^# \*\*\*" app/
+```
+
+ШАГ 2: Если найдутся, заменить на:
+- Пустые строки для визуального разделения
+- Или содержательные комментарии, объясняющие логику
+
+ШАГ 3: Добавить в pre-commit hook проверку на такие разделители
+
+=== 6. БИЗНЕС-ЛОГИКА ЛУЧШЕ СМОТРИТСЯ НЕ В РОУТЕРАХ ===
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+- Бизнес-логика вынесена в app/services/grades.py
+- Роутеры только вызывают сервисы и обрабатывают HTTP
+
+ПРОВЕРКА:
+1. app/routers/upload.py: вызывает grades_service.upload_grades() ✓
+2. app/routers/students.py: вызывает grades_service.get_students_*() ✓
+
+КОНКРЕТНЫЕ ДЕЙСТВИЯ:
+Убедиться, что в сервисах нет HTTP-специфичного кода (нет).
+
+=== 7. SQL-КОД В РОУТЕРАХ ===
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+- SQL сосредоточен в app/repositories/grades.py ✓
+- Роутеры не содержат SQL запросов ✓
+
+ПРОВЕРКА:
+- app/routers/upload.py: нет SQL ✓
+- app/routers/students.py: нет SQL ✓
+
+КОНКРЕТНЫЕ ДЕЙСТВИЯ:
+Никаких действий не требуется, архитектура уже правильная.
+
+=== 8. .env, ТЕСТЫ, НОРМАЛЬНЫЕ ФОРМЫ, ФИКСТУРЫ, DOCSTRINGS, HEALTH РУЧКА, ВАЛИДАТОРЫ ===
+
+8.1 .env
+Текущее состояние: есть .env.example, используется pydantic-settings
+Действия: Убедиться, что в .env.example есть все необходимые переменные
+
+8.2 Тесты
+Текущее состояние: 35 тестов, хорошее покрытие
+Действия по улучшению:
+- Добавить интеграционные тесты с реальной БД
+- Добавить тесты на производительность для больших CSV
+- Добавить тесты на конкурентную загрузку
+
+8.3 Нормальные формы в БД
+Текущее состояние: схема в init.sql соответствует 3НФ
+Проверка:
+- students: id, full_name, group_number (uq_students_name_group) ✓
+- grades: id, student_id, grade, date (uq_grades_student_date) ✓
+- Нет избыточных данных, нет транзитивных зависимостей ✓
+
+8.4 Фикстуры
+Текущее состояние: есть папка fixtures с 3 CSV файлами
+Действия по улучшению:
+- Добавить фикстуры для edge cases (пустые значения, Unicode символы)
+- Добавить фикстуру с очень большим файлом (10k+ строк)
+
+8.5 Docstrings
+Текущее состояние: есть, но можно улучшить
+Конкретные действия:
+- Проверить все публичные функции и классы на наличие docstrings
+- Добавить примеры использования для сложных функций
+- Добавить информацию о возможных исключениях
+- Привести к единому стилю (Google style рекомендован)
+
+8.6 Health ручка
+Текущее состояние: есть GET /health
+Проверка: работает, возвращает {"status": "ok"}
+Действия по улучшению:
+- Добавить проверку подключения к БД
+- Добавить проверку доступности диска
+
+8.7 Валидаторы
+Текущее состояние: есть app/validators.py с подробной валидацией
+Проверка: обрабатывает кодировки, формат дат, диапазон оценок, обязательные поля
+Действия по улучшению:
+- Добавить валидацию максимальной длины строк
+- Добавить валидацию недопустимых символов в ФИО
+- Добавить поддержку разных форматов дат (опционально)
+
+=== 9. ДОПОЛНИТЕЛЬНЫЕ УЛУЧШЕНИЯ ===
+
+9.1 Добавить линтеры и форматеры
+```bash
+uv add --dev black isort flake8 mypy
+```
+
+Создать pyproject.toml конфигурацию:
+```toml
+[tool.black]
+line-length = 88
+include = '\.py$'
+
+[tool.isort]
+profile = "black"
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = "E203,W503"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+```
+
+9.2 Добавить pre-commit хуки
+Создать .pre-commit-config.yaml:
+```yaml
+repos:
+  - repo: https://github.com/psf/black
+    rev: 23.12.1
+    hooks:
+      - id: black
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+```
+
+9.3 Настроить GitHub Actions
+Создать .github/workflows/ci.yml:
+```yaml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --dev
+      - run: uv run pytest -v
+```
+
+=== 10. ПРОВЕРОЧНЫЙ ЧЕК-ЛИСТ ===
+
+После выполнения всех исправлений:
+
+1. [ ] Проект запускается через docker compose up --build
+2. [ ] Все тесты проходят: pytest -v
+3. [ ] Линтеры не выдают ошибок: black --check ., flake8 ., mypy .
+4. [ ] README обновлен и содержит актуальные инструкции
+5. [ ] Миграции работают через Alembic
+6. [ ] Health ручка проверяет подключение к БД
+7. [ ] Валидаторы обрабатывают все edge cases
+8. [ ] Код не содержит комментариев-разделителей
+9. [ ] Бизнес-логика полностью вынесена из роутеров
+10. [ ] SQL полностью вынесен из роутеров
+
+=== РЕЗЮМЕ ВРЕМЕНИ НА ИСПРАВЛЕНИЯ ===
+
+1. Docker compose + uv.lock: 30 минут
+2. Миграции на Alembic: 2-3 часа
+3. Улучшение тестов: 1-2 часа
+4. Линтинг и pre-commit: 1 час
+5. Документация и README: 1 час
+6. Мелкие улучшения (docstrings, health check): 2 часа
+
+ОБЩЕЕ ВРЕМЯ: 8-10 часов
+
+=== ПРИОРИТЕТ ИСПРАВЛЕНИЙ ===
+
+1. ВЫСОКИЙ: Docker compose запуск (блокирующая проблема)
+2. ВЫСОКИЙ: Миграции на Alembic (требование в фидбеке)
+3. СРЕДНИЙ: Линтинг и кодстайл
+4. СРЕДНИЙ: Улучшение тестов
+5. НИЗКИЙ: Дополнительные улучшения (health check, docstrings)
+
+После выполнения этих исправлений проект будет соответствовать всем требованиям фидбека и готов к повторной отправке.
